@@ -10,8 +10,9 @@ def is_origin_union_type(origin: Any) -> bool:
         from types import UnionType
 
         return origin in [Union, UnionType]
-    
+
     return origin is Union
+
 
 def get_json_type_for_py_type(arg: str) -> str:
     """
