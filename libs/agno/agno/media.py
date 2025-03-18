@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Tuple, Union
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, model_validator
 
 
 class Media(BaseModel):
