@@ -1,7 +1,7 @@
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 
 class Media(BaseModel):
@@ -261,8 +261,27 @@ class File(BaseModel):
     url: Optional[str] = None
     filepath: Optional[Union[Path, str]] = None
     content: Optional[Any] = None
-    mime_type: Optional[
-        Literal[
+    mime_type: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_at_least_one_source(cls, data):
+        """Ensure at least one of url, filepath, or content is provided."""
+        if isinstance(data, dict) and not any(data.get(field) for field in ["url", "filepath", "content"]):
+            raise ValueError("At least one of url, filepath, or content must be provided")
+        return data
+
+    @field_validator("mime_type")
+    @classmethod
+    def validate_mime_type(cls, v):
+        """Validate that the mime_type is one of the allowed types."""
+        if v is not None and v not in cls.valid_mime_types():
+            raise ValueError(f"Invalid MIME type: {v}. Must be one of: {cls.valid_mime_types()}")
+        return v
+
+    @classmethod
+    def valid_mime_types(cls) -> List[str]:
+        return [
             "application/pdf",
             "application/x-javascript",
             "text/javascript",
@@ -276,15 +295,6 @@ class File(BaseModel):
             "text/xml",
             "text/rtf",
         ]
-    ] = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def check_at_least_one_source(cls, data):
-        """Ensure at least one of url, filepath, or content is provided."""
-        if isinstance(data, dict) and not any(data.get(field) for field in ["url", "filepath", "content"]):
-            raise ValueError("At least one of url, filepath, or content must be provided")
-        return data
 
     @property
     def file_url_content(self) -> Optional[Tuple[bytes, str]]:
