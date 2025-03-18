@@ -261,22 +261,22 @@ class File(BaseModel):
     url: Optional[str] = None
     filepath: Optional[Union[Path, str]] = None
     content: Optional[Any] = None
-    mime_type: Optional[str] = None
-
-    VALID_MIME_TYPES: List[str] = [
-        "application/pdf",
-        "application/x-javascript",
-        "text/javascript",
-        "application/x-python",
-        "text/x-python",
-        "text/plain",
-        "text/html",
-        "text/css",
-        "text/md",
-        "text/csv",
-        "text/xml",
-        "text/rtf",
-    ]
+    mime_type: Optional[
+        Literal[
+            "application/pdf",
+            "application/x-javascript",
+            "text/javascript",
+            "application/x-python",
+            "text/x-python",
+            "text/plain",
+            "text/html",
+            "text/css",
+            "text/md",
+            "text/csv",
+            "text/xml",
+            "text/rtf",
+        ]
+    ] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -285,14 +285,6 @@ class File(BaseModel):
         if isinstance(data, dict) and not any(data.get(field) for field in ["url", "filepath", "content"]):
             raise ValueError("At least one of url, filepath, or content must be provided")
         return data
-
-    @field_validator("mime_type")
-    @classmethod
-    def validate_mime_type(cls, v):
-        """Validate that the mime_type is one of the allowed types."""
-        if v is not None and v not in cls.VALID_MIME_TYPES:
-            raise ValueError(f"Invalid MIME type: {v}. Must be one of: {cls.VALID_MIME_TYPES}")
-        return v
 
     @property
     def file_url_content(self) -> Optional[Tuple[bytes, str]]:
