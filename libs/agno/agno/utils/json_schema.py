@@ -59,7 +59,8 @@ def get_json_schema_for_arg(t: Any) -> Optional[Dict[str, Any]]:
             for arg in type_args:
                 try:
                     schema = get_json_schema_for_arg(arg)
-                    types.append(schema)
+                    if schema:
+                        types.append(schema)
                 except Exception:
                     continue
             return {"anyOf": types} if types else None
@@ -83,6 +84,15 @@ def get_json_schema(
             continue
 
         try:
+            # Check if type is Optional (Union with NoneType)
+            type_origin = get_origin(v)
+            type_args = get_args(v)
+            is_optional = type_origin is Union and len(type_args) == 2 and any(arg is type(None) for arg in type_args)
+
+            # Get the actual type if it's Optional
+            if is_optional:
+                v = next(arg for arg in type_args if arg is not type(None))
+
             # Handle cases with no type hint
             if v:
                 arg_json_schema = get_json_schema_for_arg(v)
@@ -90,6 +100,12 @@ def get_json_schema(
                 arg_json_schema = {}
 
             if arg_json_schema is not None:
+                if is_optional:
+                    # Handle null type for optional fields
+                    if isinstance(arg_json_schema["type"], list):
+                        arg_json_schema["type"].append("null")
+                    else:
+                        arg_json_schema["type"] = [arg_json_schema["type"], "null"]
                 # Add description
                 if param_descriptions and k in param_descriptions and param_descriptions[k]:
                     arg_json_schema["description"] = param_descriptions[k]
