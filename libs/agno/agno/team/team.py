@@ -3053,9 +3053,7 @@ class Team:
         )
         if user_message_str is not None and self.memory_manager is not None and not self.enable_agentic_memory:
             tasks.append(
-                self.memory_manager.acreate_user_memories(
-                    message=user_message_str, user_id=user_id, team_id=self.id
-                )
+                self.memory_manager.acreate_user_memories(message=user_message_str, user_id=user_id, team_id=self.id)
             )
 
         if self.session_summary_manager is not None:
