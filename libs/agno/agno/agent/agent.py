@@ -247,6 +247,10 @@ class Agent:
     send_media_to_model: bool = True
     # If True, store media in run output
     store_media: bool = True
+    # If True, store tool results in run output
+    store_tool_results: bool = True
+    # If True, store history messages in run output
+    store_history_messages: bool = True
 
     # --- System message settings ---
     # Provide the system message as a string or function
@@ -384,6 +388,8 @@ class Agent:
         add_history_to_context: bool = False,
         num_history_runs: int = 3,
         store_media: bool = True,
+        store_tool_results: bool = True,
+        store_history_messages: bool = True,
         knowledge: Optional[Knowledge] = None,
         knowledge_filters: Optional[Dict[str, Any]] = None,
         enable_agentic_knowledge_filters: Optional[bool] = None,
@@ -484,6 +490,8 @@ class Agent:
             )
 
         self.store_media = store_media
+        self.store_tool_results = store_tool_results
+        self.store_history_messages = store_history_messages
 
         self.knowledge = knowledge
         self.knowledge_filters = knowledge_filters
@@ -883,8 +891,6 @@ class Agent:
 
         if self.store_media:
             self._store_media(run_response, model_response)
-        else:
-            self._scrub_media_from_run_output(run_response)
 
         # We should break out of the run function
         if any(tool_call.is_paused for tool_call in run_response.tools or []):
@@ -930,7 +936,11 @@ class Agent:
         # Consume the response iterator to ensure the memory is updated before the run is completed
         deque(response_iterator, maxlen=0)
 
-        # 11. Save session to memory
+        # 11. Scrub the stored run based on storage flags
+        if self._scrub_run_output_for_storage(run_response):
+            session.upsert_run(run=run_response)
+
+        # 12. Save session to memory
         self.save_session(session=session)
 
         # Log Agent Telemetry
@@ -957,7 +967,6 @@ class Agent:
         dependencies: Optional[Dict[str, Any]] = None,
         response_format: Optional[Union[Dict, Type[BaseModel]]] = None,
         stream_intermediate_steps: bool = False,
-        workflow_context: Optional[Dict] = None,
         yield_run_response: bool = False,
         debug_mode: Optional[bool] = None,
         **kwargs: Any,
@@ -973,7 +982,8 @@ class Agent:
         6. Optional: Save output to file if save_response_to_file is set
         7. Add the RunOutput to the Agent Session
         8. Update Agent Memory
-        9. Save session to storage
+        9. Create the run completed event
+        10. Save session to storage
         """
 
         # Register run for cancellation tracking
@@ -1034,7 +1044,7 @@ class Agent:
         try:
             # Start the Run by yielding a RunStarted event
             if stream_intermediate_steps:
-                yield self._handle_event(create_run_started_event(run_response), run_response, workflow_context)
+                yield self._handle_event(create_run_started_event(run_response), run_response)
 
             # 3. Reason about the task if reasoning is enabled
             yield from self._handle_reasoning_stream(run_response=run_response, run_messages=run_messages)
@@ -1050,7 +1060,6 @@ class Agent:
                     run_messages=run_messages,
                     response_format=response_format,
                     stream_intermediate_steps=stream_intermediate_steps,
-                    workflow_context=workflow_context,
                 ):
                     raise_if_cancelled(run_response.run_id)  # type: ignore
                     yield event
@@ -1066,7 +1075,6 @@ class Agent:
                     run_messages=run_messages,
                     response_format=response_format,
                     stream_intermediate_steps=stream_intermediate_steps,
-                    workflow_context=workflow_context,
                 ):
                     raise_if_cancelled(run_response.run_id)  # type: ignore
                     if isinstance(event, RunContentEvent):
@@ -1084,7 +1092,6 @@ class Agent:
                     run_response=run_response,
                     run_messages=run_messages,
                     stream_intermediate_steps=stream_intermediate_steps,
-                    workflow_context=workflow_context,
                 ):
                     raise_if_cancelled(run_response.run_id)  # type: ignore
                     yield event
@@ -1115,9 +1122,6 @@ class Agent:
             # 5. Calculate session metrics
             self._update_session_metrics(session=session, run_response=run_response)
 
-            completed_event = self._handle_event(
-                create_run_completed_event(from_run_response=run_response), run_response, workflow_context
-            )
             # 6. Optional: Save output to file if save_response_to_file is set
             self.save_run_response_to_file(
                 run_response=run_response,
@@ -1134,7 +1138,16 @@ class Agent:
                 run_response=run_response, run_messages=run_messages, session=session, user_id=user_id
             )
 
-            # 9. Save session to storage
+            # 9. Create the run completed event
+            completed_event = self._handle_event(
+                create_run_completed_event(from_run_response=run_response), run_response
+            )
+
+            # 10. Scrub the stored run based on storage flags
+            if self._scrub_run_output_for_storage(run_response):
+                session.upsert_run(run=run_response)
+
+            # 11. Save session to storage
             self.save_session(session=session)
 
             if stream_intermediate_steps:
@@ -1158,7 +1171,6 @@ class Agent:
             yield self._handle_event(
                 create_run_cancelled_event(from_run_response=run_response, reason=str(e)),
                 run_response,
-                workflow_context,
             )
 
             # Add the RunOutput to Agent Session even when cancelled
@@ -1302,9 +1314,6 @@ class Agent:
         )
         add_history = add_history_to_context if add_history_to_context is not None else self.add_history_to_context
 
-        # Extract workflow context from kwargs if present
-        workflow_context = kwargs.pop("workflow_context", None)
-
         # Initialize Knowledge Filters
         effective_filters = knowledge_filters
 
@@ -1380,7 +1389,6 @@ class Agent:
                         dependencies=run_dependencies,
                         response_format=response_format,
                         stream_intermediate_steps=stream_intermediate_steps,
-                        workflow_context=workflow_context,
                         yield_run_response=yield_run_response,
                         debug_mode=debug_mode,
                         **kwargs,
@@ -1578,8 +1586,6 @@ class Agent:
 
         if self.store_media:
             self._store_media(run_response, model_response)
-        else:
-            self._scrub_media_from_run_output(run_response)
 
         # We should break out of the run function
         if any(tool_call.is_paused for tool_call in run_response.tools or []):
@@ -1624,7 +1630,11 @@ class Agent:
         ):
             pass
 
-        # 12. Save session to storage
+        # 12. Scrub the stored run based on storage flags
+        if self._scrub_run_output_for_storage(run_response):
+            session.upsert_run(run=run_response)
+
+        # 13. Save session to storage
         self.save_session(session=session)
 
         # Log Agent Telemetry
@@ -1651,7 +1661,6 @@ class Agent:
         dependencies: Optional[Dict[str, Any]] = None,
         response_format: Optional[Union[Dict, Type[BaseModel]]] = None,
         stream_intermediate_steps: bool = False,
-        workflow_context: Optional[Dict] = None,
         yield_run_response: Optional[bool] = None,
         debug_mode: Optional[bool] = None,
         **kwargs: Any,
@@ -1667,7 +1676,8 @@ class Agent:
         6. Calculate session metrics
         7. Add RunOutput to Agent Session
         8. Update Agent Memory
-        9. Save session to storage
+        9. Create the run completed event
+        10. Save session to storage
         """
 
         # 1. Resolving here for async requirement
@@ -1731,7 +1741,7 @@ class Agent:
         try:
             # Start the Run by yielding a RunStarted event
             if stream_intermediate_steps:
-                yield self._handle_event(create_run_started_event(run_response), run_response, workflow_context)
+                yield self._handle_event(create_run_started_event(run_response), run_response)
 
             # 4. Reason about the task if reasoning is enabled
             async for item in self._ahandle_reasoning_stream(run_response=run_response, run_messages=run_messages):
@@ -1749,7 +1759,6 @@ class Agent:
                     run_messages=run_messages,
                     response_format=response_format,
                     stream_intermediate_steps=stream_intermediate_steps,
-                    workflow_context=workflow_context,
                 ):
                     raise_if_cancelled(run_response.run_id)  # type: ignore
                     yield event
@@ -1765,7 +1774,6 @@ class Agent:
                     run_messages=run_messages,
                     response_format=response_format,
                     stream_intermediate_steps=stream_intermediate_steps,
-                    workflow_context=workflow_context,
                 ):
                     raise_if_cancelled(run_response.run_id)  # type: ignore
                     if isinstance(event, RunContentEvent):
@@ -1782,7 +1790,6 @@ class Agent:
                     session=session,
                     run_response=run_response,
                     run_messages=run_messages,
-                    workflow_context=workflow_context,
                     stream_intermediate_steps=stream_intermediate_steps,
                 ):
                     raise_if_cancelled(run_response.run_id)  # type: ignore
@@ -1811,10 +1818,6 @@ class Agent:
             if run_response.metrics:
                 run_response.metrics.stop_timer()
 
-            completed_event = self._handle_event(
-                create_run_completed_event(from_run_response=run_response), run_response, workflow_context
-            )
-
             # 6. Calculate session metrics
             self._update_session_metrics(session=session, run_response=run_response)
 
@@ -1835,7 +1838,16 @@ class Agent:
             ):
                 yield event
 
-            # 9. Save session to storage
+            # 9. Create the run completed event
+            completed_event = self._handle_event(
+                create_run_completed_event(from_run_response=run_response), run_response
+            )
+
+            # 10. Scrub the stored run based on storage flags
+            if self._scrub_run_output_for_storage(run_response):
+                session.upsert_run(run=run_response)
+
+            # 11. Save session to storage
             self.save_session(session=session)
 
             if stream_intermediate_steps:
@@ -1859,7 +1871,6 @@ class Agent:
             yield self._handle_event(
                 create_run_cancelled_event(from_run_response=run_response, reason=str(e)),
                 run_response,
-                workflow_context,
             )
 
             # Add the RunOutput to Agent Session even when cancelled
@@ -1999,9 +2010,6 @@ class Agent:
         )
         add_history = add_history_to_context if add_history_to_context is not None else self.add_history_to_context
 
-        # Extract workflow context from kwargs if present
-        workflow_context = kwargs.pop("workflow_context", None)
-
         effective_filters = knowledge_filters
         # When filters are passed manually
         if self.knowledge_filters or knowledge_filters:
@@ -2074,7 +2082,6 @@ class Agent:
                         metadata=metadata,
                         response_format=response_format,
                         stream_intermediate_steps=stream_intermediate_steps,
-                        workflow_context=workflow_context,
                         yield_run_response=yield_run_response,
                         dependencies=run_dependencies,
                         debug_mode=debug_mode,
@@ -2093,7 +2100,6 @@ class Agent:
                         metadata=metadata,
                         response_format=response_format,
                         stream_intermediate_steps=stream_intermediate_steps,
-                        workflow_context=workflow_context,
                         yield_run_response=yield_run_response,
                         dependencies=run_dependencies,
                         debug_mode=debug_mode,
@@ -2484,11 +2490,12 @@ class Agent:
         Steps:
         1. Handle any updated tools
         2. Generate a response from the Model
-        3. Update Agent Memory
-        4. Calculate session metrics
-        5. Save output to file if save_response_to_file is set
-        6. Add RunOutput to Agent Session
-        7. Save session to storage
+        3. Calculate session metrics
+        4. Save output to file if save_response_to_file is set
+        5. Add the run to memory
+        6. Update Agent Memory
+        7. Create the run completed event
+        8. Save session to storage
         """
 
         if dependencies is not None:
@@ -2523,8 +2530,6 @@ class Agent:
 
         run_response.status = RunStatus.completed
 
-        completed_event = self._handle_event(create_run_completed_event(run_response), run_response)
-
         # Set the run duration
         if run_response.metrics:
             run_response.metrics.stop_timer()
@@ -2542,7 +2547,10 @@ class Agent:
             run_response=run_response, run_messages=run_messages, session=session, user_id=user_id
         )
 
-        # 7. Save session to storage
+        # 7. Create the run completed event
+        completed_event = self._handle_event(create_run_completed_event(run_response), run_response)
+
+        # 8. Save session to storage
         self.save_session(session=session)
 
         if stream_intermediate_steps:
@@ -2882,11 +2890,12 @@ class Agent:
         Steps:
         1. Handle any updated tools
         2. Generate a response from the Model
-        3. Add the run to memory
-        4. Update Agent Memory
-        5. Calculate session metrics
-        6. Save output to file if save_response_to_file is set
-        7. Save session to storage
+        3. Calculate session metrics
+        4. Save output to file if save_response_to_file is set
+        5. Add the run to memory
+        6. Update Agent Memory
+        7. Create the run completed event
+        8. Save session to storage
         """
         # Resolve dependencies
         if dependencies is not None:
@@ -2923,8 +2932,6 @@ class Agent:
 
         run_response.status = RunStatus.completed
 
-        completed_event = self._handle_event(create_run_completed_event(run_response), run_response)
-
         # Set the run duration
         if run_response.metrics:
             run_response.metrics.stop_timer()
@@ -2943,7 +2950,10 @@ class Agent:
         ):
             yield event
 
-        # 7. Save session to storage
+        # 7. Create the run completed event
+        completed_event = self._handle_event(create_run_completed_event(run_response), run_response)
+
+        # 8. Save session to storage
         self.save_session(session=session)
 
         if stream_intermediate_steps:
@@ -3608,7 +3618,6 @@ class Agent:
         run_messages: RunMessages,
         response_format: Optional[Union[Dict, Type[BaseModel]]] = None,
         stream_intermediate_steps: bool = False,
-        workflow_context: Optional[Dict] = None,
     ) -> Iterator[RunOutputEvent]:
         self.model = cast(Model, self.model)
 
@@ -3642,7 +3651,6 @@ class Agent:
                 reasoning_state=reasoning_state,
                 parse_structured_output=self.should_parse_structured_output,
                 stream_intermediate_steps=stream_intermediate_steps,
-                workflow_context=workflow_context,
             )
 
         # Determine reasoning completed
@@ -3685,7 +3693,6 @@ class Agent:
         run_messages: RunMessages,
         response_format: Optional[Union[Dict, Type[BaseModel]]] = None,
         stream_intermediate_steps: bool = False,
-        workflow_context: Optional[Dict] = None,
     ) -> AsyncIterator[RunOutputEvent]:
         self.model = cast(Model, self.model)
 
@@ -3721,7 +3728,6 @@ class Agent:
                 reasoning_state=reasoning_state,
                 parse_structured_output=self.should_parse_structured_output,
                 stream_intermediate_steps=stream_intermediate_steps,
-                workflow_context=workflow_context,
             ):
                 yield event
 
@@ -3766,7 +3772,6 @@ class Agent:
         reasoning_state: Optional[Dict[str, Any]] = None,
         parse_structured_output: bool = False,
         stream_intermediate_steps: bool = False,
-        workflow_context: Optional[Dict] = None,
     ) -> Iterator[RunOutputEvent]:
         if isinstance(model_response_event, tuple(get_args(RunOutputEvent))) or isinstance(
             model_response_event, tuple(get_args(TeamRunOutputEvent))
@@ -3830,7 +3835,6 @@ class Agent:
                             content_type=content_type,
                         ),
                         run_response,
-                        workflow_context=workflow_context,
                     )
                 elif (
                     model_response_event.content is not None
@@ -3849,7 +3853,6 @@ class Agent:
                             model_provider_data=model_response_event.provider_data,
                         ),
                         run_response,
-                        workflow_context=workflow_context,
                     )
 
                 # Process audio
@@ -3910,7 +3913,6 @@ class Agent:
                             response_audio=run_response.response_audio,
                         ),
                         run_response,
-                        workflow_context=workflow_context,
                     )
 
                 if model_response_event.images is not None:
@@ -3920,7 +3922,6 @@ class Agent:
                             image=model_response_event.images[-1],
                         ),
                         run_response,
-                        workflow_context=workflow_context,
                     )
 
                     if model_response.images is None:
@@ -6285,12 +6286,15 @@ class Agent:
 
         # If a reasoning model is provided, use it to generate reasoning
         if reasoning_model_provided:
+            from agno.reasoning.anthropic import is_anthropic_reasoning_model
             from agno.reasoning.azure_ai_foundry import is_ai_foundry_reasoning_model
             from agno.reasoning.deepseek import is_deepseek_reasoning_model
+            from agno.reasoning.gemini import is_gemini_reasoning_model
             from agno.reasoning.groq import is_groq_reasoning_model
             from agno.reasoning.helpers import get_reasoning_agent
             from agno.reasoning.ollama import is_ollama_reasoning_model
             from agno.reasoning.openai import is_openai_reasoning_model
+            from agno.reasoning.vertexai import is_vertexai_reasoning_model
 
             reasoning_agent = self.reasoning_agent or get_reasoning_agent(
                 reasoning_model=reasoning_model,
@@ -6306,8 +6310,20 @@ class Agent:
             is_openai = is_openai_reasoning_model(reasoning_model)
             is_ollama = is_ollama_reasoning_model(reasoning_model)
             is_ai_foundry = is_ai_foundry_reasoning_model(reasoning_model)
+            is_gemini = is_gemini_reasoning_model(reasoning_model)
+            is_anthropic = is_anthropic_reasoning_model(reasoning_model)
+            is_vertexai = is_vertexai_reasoning_model(reasoning_model)
 
-            if is_deepseek or is_groq or is_openai or is_ollama or is_ai_foundry:
+            if (
+                is_deepseek
+                or is_groq
+                or is_openai
+                or is_ollama
+                or is_ai_foundry
+                or is_gemini
+                or is_anthropic
+                or is_vertexai
+            ):
                 reasoning_message: Optional[Message] = None
                 if is_deepseek:
                     from agno.reasoning.deepseek import get_deepseek_reasoning
@@ -6342,6 +6358,27 @@ class Agent:
 
                     log_debug("Starting Azure AI Foundry Reasoning", center=True, symbol="=")
                     reasoning_message = get_ai_foundry_reasoning(
+                        reasoning_agent=reasoning_agent, messages=run_messages.get_input_messages()
+                    )
+                elif is_gemini:
+                    from agno.reasoning.gemini import get_gemini_reasoning
+
+                    log_debug("Starting Gemini Reasoning", center=True, symbol="=")
+                    reasoning_message = get_gemini_reasoning(
+                        reasoning_agent=reasoning_agent, messages=run_messages.get_input_messages()
+                    )
+                elif is_anthropic:
+                    from agno.reasoning.anthropic import get_anthropic_reasoning
+
+                    log_debug("Starting Anthropic Claude Reasoning", center=True, symbol="=")
+                    reasoning_message = get_anthropic_reasoning(
+                        reasoning_agent=reasoning_agent, messages=run_messages.get_input_messages()
+                    )
+                elif is_vertexai:
+                    from agno.reasoning.vertexai import get_vertexai_reasoning
+
+                    log_debug("Starting VertexAI Reasoning", center=True, symbol="=")
+                    reasoning_message = get_vertexai_reasoning(
                         reasoning_agent=reasoning_agent, messages=run_messages.get_input_messages()
                     )
 
@@ -6420,6 +6457,12 @@ class Agent:
                     reasoning_agent_response: RunOutput = reasoning_agent.run(input=run_messages.get_input_messages())
                     if reasoning_agent_response.content is None or reasoning_agent_response.messages is None:
                         log_warning("Reasoning error. Reasoning response is empty, continuing regular session...")
+                        break
+
+                    if isinstance(reasoning_agent_response.content, str):
+                        log_warning(
+                            "Reasoning error. Content is a string, not structured output. Continuing regular session..."
+                        )
                         break
 
                     if (
@@ -6511,12 +6554,15 @@ class Agent:
 
         # If a reasoning model is provided, use it to generate reasoning
         if reasoning_model_provided:
+            from agno.reasoning.anthropic import is_anthropic_reasoning_model
             from agno.reasoning.azure_ai_foundry import is_ai_foundry_reasoning_model
             from agno.reasoning.deepseek import is_deepseek_reasoning_model
+            from agno.reasoning.gemini import is_gemini_reasoning_model
             from agno.reasoning.groq import is_groq_reasoning_model
             from agno.reasoning.helpers import get_reasoning_agent
             from agno.reasoning.ollama import is_ollama_reasoning_model
             from agno.reasoning.openai import is_openai_reasoning_model
+            from agno.reasoning.vertexai import is_vertexai_reasoning_model
 
             reasoning_agent = self.reasoning_agent or get_reasoning_agent(
                 reasoning_model=reasoning_model,
@@ -6532,8 +6578,20 @@ class Agent:
             is_openai = is_openai_reasoning_model(reasoning_model)
             is_ollama = is_ollama_reasoning_model(reasoning_model)
             is_ai_foundry = is_ai_foundry_reasoning_model(reasoning_model)
+            is_gemini = is_gemini_reasoning_model(reasoning_model)
+            is_anthropic = is_anthropic_reasoning_model(reasoning_model)
+            is_vertexai = is_vertexai_reasoning_model(reasoning_model)
 
-            if is_deepseek or is_groq or is_openai or is_ollama or is_ai_foundry:
+            if (
+                is_deepseek
+                or is_groq
+                or is_openai
+                or is_ollama
+                or is_ai_foundry
+                or is_gemini
+                or is_anthropic
+                or is_vertexai
+            ):
                 reasoning_message: Optional[Message] = None
                 if is_deepseek:
                     from agno.reasoning.deepseek import aget_deepseek_reasoning
@@ -6568,6 +6626,27 @@ class Agent:
 
                     log_debug("Starting Azure AI Foundry Reasoning", center=True, symbol="=")
                     reasoning_message = get_ai_foundry_reasoning(
+                        reasoning_agent=reasoning_agent, messages=run_messages.get_input_messages()
+                    )
+                elif is_gemini:
+                    from agno.reasoning.gemini import aget_gemini_reasoning
+
+                    log_debug("Starting Gemini Reasoning", center=True, symbol="=")
+                    reasoning_message = await aget_gemini_reasoning(
+                        reasoning_agent=reasoning_agent, messages=run_messages.get_input_messages()
+                    )
+                elif is_anthropic:
+                    from agno.reasoning.anthropic import aget_anthropic_reasoning
+
+                    log_debug("Starting Anthropic Claude Reasoning", center=True, symbol="=")
+                    reasoning_message = await aget_anthropic_reasoning(
+                        reasoning_agent=reasoning_agent, messages=run_messages.get_input_messages()
+                    )
+                elif is_vertexai:
+                    from agno.reasoning.vertexai import aget_vertexai_reasoning
+
+                    log_debug("Starting VertexAI Reasoning", center=True, symbol="=")
+                    reasoning_message = await aget_vertexai_reasoning(
                         reasoning_agent=reasoning_agent, messages=run_messages.get_input_messages()
                     )
 
@@ -6649,6 +6728,12 @@ class Agent:
                     )
                     if reasoning_agent_response.content is None or reasoning_agent_response.messages is None:
                         log_warning("Reasoning error. Reasoning response is empty, continuing regular session...")
+                        break
+
+                    if isinstance(reasoning_agent_response.content, str):
+                        log_warning(
+                            "Reasoning error. Content is a string, not structured output. Continuing regular session..."
+                        )
                         break
 
                     if reasoning_agent_response.content.reasoning_steps is None:
@@ -6882,7 +6967,6 @@ class Agent:
         run_response: RunOutput,
         run_messages: RunMessages,
         stream_intermediate_steps: bool = False,
-        workflow_context: Optional[Dict] = None,
     ):
         """Parse the model response using the output model."""
         from agno.utils.events import (
@@ -6906,7 +6990,6 @@ class Agent:
                 run_response=run_response,
                 model_response=model_response,
                 model_response_event=model_response_event,
-                workflow_context=workflow_context,
                 stream_intermediate_steps=stream_intermediate_steps,
             )
 
@@ -6935,7 +7018,6 @@ class Agent:
         run_response: RunOutput,
         run_messages: RunMessages,
         stream_intermediate_steps: bool = False,
-        workflow_context: Optional[Dict] = None,
     ):
         """Parse the model response using the output model."""
         from agno.utils.events import (
@@ -6961,7 +7043,6 @@ class Agent:
                 run_response=run_response,
                 model_response=model_response,
                 model_response_event=model_response_event,
-                workflow_context=workflow_context,
                 stream_intermediate_steps=stream_intermediate_steps,
             ):
                 yield event
@@ -6976,14 +7057,7 @@ class Agent:
         # Update the RunResponse metrics
         run_response.metrics = self._calculate_run_metrics(messages_for_run_response)
 
-    def _handle_event(self, event: RunOutputEvent, run_response: RunOutput, workflow_context: Optional[Dict] = None):
-        if workflow_context:
-            event.workflow_id = workflow_context.get("workflow_id")
-            event.workflow_run_id = workflow_context.get("workflow_run_id")
-            event.step_id = workflow_context.get("step_id")
-            event.step_name = workflow_context.get("step_name")
-            event.step_index = workflow_context.get("step_index")
-
+    def _handle_event(self, event: RunOutputEvent, run_response: RunOutput):
         # We only store events that are not run_response_content events
         events_to_skip = [event.value for event in self.events_to_skip] if self.events_to_skip else []
         if self.store_events and event.event not in events_to_skip:
@@ -7704,6 +7778,56 @@ class Agent:
         message.audio_output = None
         message.image_output = None
         message.video_output = None
+
+    def _scrub_tool_results_from_run_output(self, run_response: RunOutput) -> None:
+        """
+        Remove all tool-related data from RunOutput when store_tool_results=False.
+        This includes tool calls, tool results, and tool-related message fields.
+        """
+        # Remove tool results (messages with role="tool")
+        if run_response.messages:
+            run_response.messages = [msg for msg in run_response.messages if msg.role != "tool"]
+            # Also scrub tool-related fields from remaining messages
+            for message in run_response.messages:
+                self._scrub_tool_data_from_message(message)
+
+    def _scrub_tool_data_from_message(self, message: Message) -> None:
+        """Remove all tool-related data from a Message object."""
+        message.tool_calls = None
+        message.tool_call_id = None
+        message.tool_name = None
+        message.tool_args = None
+        message.tool_call_error = None
+
+    def _scrub_history_messages_from_run_output(self, run_response: RunOutput) -> None:
+        """
+        Remove all history messages from RunOutput when store_history_messages=False.
+        This removes messages that were loaded from the agent's memory.
+        """
+        # Remove messages with from_history=True
+        if run_response.messages:
+            run_response.messages = [msg for msg in run_response.messages if not msg.from_history]
+
+    def _scrub_run_output_for_storage(self, run_response: RunOutput) -> bool:
+        """
+        Scrub run output based on storage flags before persisting to database.
+        Returns True if any scrubbing was done, False otherwise.
+        """
+        scrubbed = False
+
+        if not self.store_media:
+            self._scrub_media_from_run_output(run_response)
+            scrubbed = True
+
+        if not self.store_tool_results:
+            self._scrub_tool_results_from_run_output(run_response)
+            scrubbed = True
+
+        if not self.store_history_messages:
+            self._scrub_history_messages_from_run_output(run_response)
+            scrubbed = True
+
+        return scrubbed
 
     def _validate_media_object_id(
         self,
